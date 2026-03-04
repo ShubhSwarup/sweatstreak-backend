@@ -5,6 +5,7 @@ const morgan = require("morgan");
 require("dotenv").config();
 
 const authRoutes = require("./modules/auth/auth.routes");
+const exerciseRoutes = require("./modules/exercises/exercise.routes");
 
 const app = express();
 
@@ -18,5 +19,6 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api/auth", authRoutes);
+app.use("/api/exercises", exerciseRoutes);
 
 module.exports = app;
