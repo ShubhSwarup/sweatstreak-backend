@@ -129,3 +129,19 @@ exports.getSessionById = async (req, res) => {
     });
   }
 };
+
+exports.getActiveSession = async (req, res) => {
+  try {
+    const session = await service.getActiveSession(req.user.id);
+
+    res.json({
+      success: true,
+      data: session || null,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+};

@@ -2,6 +2,9 @@ const WorkoutSession = require("../../models/workoutSession.model");
 const WorkoutTemplate = require("../../models/workoutTemplate.model");
 const UserExerciseStats = require("../../models/userExerciseStats.model");
 const streakService = require("../streak/streak.service");
+const xpService = require("../xp/xp.service");
+const progressionService = require("../progression/progression.service");
+const Exercise = require("../../models/exercise.model");
 
 async function getUserSession(sessionId, userId) {
   const session = await WorkoutSession.findOne({
@@ -29,39 +32,95 @@ exports.startSession = async (userId, data) => {
 
     if (!template) throw new Error("Template not found");
 
+    // load exercise metadata once
+    const exerciseIds = template.exercises.map((e) => e.exercise);
+
+    const exerciseDocs = await Exercise.find({
+      _id: { $in: exerciseIds },
+    }).select("exerciseType trackingType");
+
+    const exerciseMap = new Map();
+
+    for (const ex of exerciseDocs) {
+      exerciseMap.set(ex._id.toString(), ex);
+    }
+
+    // recent sessions
+    const lastSessions = await WorkoutSession.find({
+      user: userId,
+      completed: true,
+    })
+      .select("exercises.exercise exercises.sets")
+      .sort({ startedAt: -1 })
+      .limit(20)
+      .lean();
+
+    const lastExerciseMap = new Map();
+
+    for (const session of lastSessions) {
+      for (const ex of session.exercises) {
+        const key = ex.exercise.toString();
+        if (!lastExerciseMap.has(key)) {
+          lastExerciseMap.set(key, ex);
+        }
+      }
+    }
+
+    const statsList = await UserExerciseStats.find({ user: userId }).lean();
+
+    const statsMap = new Map();
+
+    for (const stat of statsList) {
+      statsMap.set(stat.exercise.toString(), stat);
+    }
+
     for (let i = 0; i < template.exercises.length; i++) {
       const ex = template.exercises[i];
+      const exerciseId = ex.exercise.toString();
 
-      const lastSession = await WorkoutSession.findOne({
-        user: userId,
-        completed: true,
-        "exercises.exercise": ex.exercise,
-      }).sort({ startedAt: -1 });
+      const exerciseDoc = exerciseMap.get(exerciseId);
+      const lastExercise = lastExerciseMap.get(exerciseId);
+      const stats = statsMap.get(exerciseId);
 
       let sets = [];
+      let nextWeight = null;
 
-      if (lastSession) {
-        const lastExercise = lastSession.exercises.find(
-          (e) => e.exercise.toString() === ex.exercise.toString(),
-        );
+      if (stats) {
+        const suggestion =
+          progressionService.calculateSuggestionFromStats(stats);
+        nextWeight = suggestion?.nextWeight ?? null;
+      }
 
-        if (lastExercise) {
-          sets = lastExercise.sets.map((s, index) => ({
-            setNumber: index + 1,
-            weight: s.weight,
-            reps: s.reps,
-            durationSeconds: s.durationSeconds,
-            distance: s.distance,
-            rpe: s.rpe,
+      if (lastExercise) {
+        sets = lastExercise.sets.map((s, index) => ({
+          setNumber: index + 1,
+          weight: nextWeight ?? s.weight,
+          reps: s.reps,
+          durationSeconds: s.durationSeconds,
+          distance: s.distance,
+          rpe: s.rpe,
+          completed: false,
+        }));
+      } else {
+        const defaultSets = ex.sets || 3;
+
+        for (let j = 0; j < defaultSets; j++) {
+          sets.push({
+            setNumber: j + 1,
+            weight: null,
+            reps: null,
             completed: false,
-          }));
+          });
         }
       }
 
       exercises.push({
         exercise: ex.exercise,
+        exerciseType: exerciseDoc.exerciseType,
+        trackingType: exerciseDoc.trackingType,
         order: i + 1,
         sets,
+        restSeconds: ex.restSeconds || 90,
       });
     }
   }
@@ -74,7 +133,6 @@ exports.startSession = async (userId, data) => {
     exercises,
   });
 };
-
 /**
  * Add exercise to session
  */
@@ -82,11 +140,14 @@ exports.addExercise = async (userId, sessionId, exerciseData) => {
   const session = await getUserSession(sessionId, userId);
 
   if (!session) throw new Error("Workout session not found");
-
+  if (session.completed) {
+    throw new Error("Session already finished");
+  }
   session.exercises.push({
     exercise: exerciseData.exercise,
     order: exerciseData.order,
     notes: exerciseData.notes || "",
+    restSeconds: exerciseData.restSeconds || 90,
     sets: [],
   });
 
@@ -99,7 +160,9 @@ exports.addExercise = async (userId, sessionId, exerciseData) => {
 
 exports.addSet = async (userId, sessionId, exerciseIndex, setData) => {
   const session = await getUserSession(sessionId, userId);
+
   if (!session) throw new Error("Workout session not found");
+  if (session.completed) throw new Error("Session already finished");
 
   const exercise = session.exercises[exerciseIndex];
 
@@ -117,23 +180,20 @@ exports.addSet = async (userId, sessionId, exerciseIndex, setData) => {
 
   exercise.sets.push(newSet);
 
-  // ---------- SUMMARY CALCULATION ----------
-
   let bestWeight = 0;
   let bestReps = 0;
   let volume = 0;
 
   for (const set of exercise.sets) {
-    if (set.weight && set.reps) {
-      volume += set.weight * set.reps;
-
-      if (set.weight > bestWeight) {
-        bestWeight = set.weight;
+    if (exercise.exerciseType === "strength") {
+      if (set.weight != null && set.reps != null) {
+        volume += set.weight * set.reps;
+        bestWeight = Math.max(bestWeight, set.weight);
+        bestReps = Math.max(bestReps, set.reps);
       }
-
-      if (set.reps > bestReps) {
-        bestReps = set.reps;
-      }
+    } else {
+      if (set.distance != null) volume += set.distance;
+      if (set.durationSeconds != null) volume += set.durationSeconds;
     }
   }
 
@@ -152,32 +212,154 @@ exports.addSet = async (userId, sessionId, exerciseIndex, setData) => {
  */
 exports.finishSession = async (userId, sessionId) => {
   const session = await getUserSession(sessionId, userId);
+
   if (!session) throw new Error("Workout session not found");
+  if (session.completed) return session;
 
   session.endedAt = new Date();
   session.durationSeconds = (session.endedAt - session.startedAt) / 1000;
   session.completed = true;
 
-  await session.save();
-  await streakService.updateStreak(userId, session.endedAt);
+  let totalVolume = 0;
+  let totalSets = 0;
+  let totalExercises = 0;
+
+  const personalRecords = [];
+
+  const bulkOps = [];
+
   for (const ex of session.exercises) {
     const summary = ex.summary;
     if (!summary) continue;
 
-    const stats = await UserExerciseStats.findOneAndUpdate(
+    const volumeScore = summary.volume;
+
+    const estimated1RM = summary.bestWeight * (1 + summary.bestReps / 30);
+
+    bulkOps.push({
+      updateOne: {
+        filter: {
+          user: userId,
+          exercise: ex.exercise,
+        },
+        update: {
+          $max: {
+            bestWeight: summary.bestWeight,
+            bestReps: summary.bestReps,
+            volumeScore,
+            estimated1RM,
+          },
+          $set: {
+            lastWeight: summary.bestWeight,
+            lastReps: summary.bestReps,
+            lastSession: session.endedAt,
+          },
+          $inc: {
+            totalVolume: summary.volume || 0,
+            totalSets: summary.setCount || 0,
+          },
+        },
+        upsert: true,
+      },
+    });
+  }
+
+  if (bulkOps.length > 0) {
+    await UserExerciseStats.bulkWrite(bulkOps);
+  }
+
+  session.sessionSummary = {
+    totalVolume,
+    totalSets,
+    totalExercises,
+  };
+
+  await session.save();
+
+  const streak = await streakService.updateStreak(userId, session.endedAt);
+  await xpService.addWorkoutXP(userId, session, streak?.currentStreak > 1);
+
+  for (const ex of session.exercises) {
+    const summary = ex.summary;
+    if (!summary) continue;
+
+    const volumeScore = summary.volume;
+
+    const stats = await UserExerciseStats.findOne({
+      user: userId,
+      exercise: ex.exercise,
+    });
+
+    const previousBestWeight = stats?.bestWeight || 0;
+    const previousVolume = stats?.volumeScore || 0;
+    const previous1RM = stats?.estimated1RM || 0;
+
+    const estimated1RM = summary.bestWeight * (1 + summary.bestReps / 30);
+
+    if (summary.bestWeight > previousBestWeight) {
+      personalRecords.push({
+        exercise: ex.exercise,
+        type: "weight",
+        value: summary.bestWeight,
+      });
+    }
+
+    if (volumeScore > previousVolume) {
+      personalRecords.push({
+        exercise: ex.exercise,
+        type: "volume",
+        value: volumeScore,
+      });
+    }
+
+    if (estimated1RM > previous1RM) {
+      personalRecords.push({
+        exercise: ex.exercise,
+        type: "1rm",
+        value: estimated1RM,
+      });
+    }
+
+    if (ex.exerciseType === "cardio") {
+      let bestDistance = 0;
+      let bestTime = 0;
+
+      for (const set of ex.sets) {
+        if (set.distance) bestDistance = Math.max(bestDistance, set.distance);
+        if (set.durationSeconds)
+          bestTime = Math.max(bestTime, set.durationSeconds);
+      }
+
+      if (bestDistance > (stats?.bestDistance || 0)) {
+        personalRecords.push({
+          exercise: ex.exercise,
+          type: "distance",
+          value: bestDistance,
+        });
+      }
+
+      if (bestTime > (stats?.bestTime || 0)) {
+        personalRecords.push({
+          exercise: ex.exercise,
+          type: "time",
+          value: bestTime,
+        });
+      }
+    }
+
+    const updatedStats = await UserExerciseStats.findOneAndUpdate(
       { user: userId, exercise: ex.exercise },
       {
         $max: {
           bestWeight: summary.bestWeight,
           bestReps: summary.bestReps,
+          volumeScore,
         },
-
         $set: {
           lastWeight: summary.bestWeight,
           lastReps: summary.bestReps,
           lastSession: session.endedAt,
         },
-
         $inc: {
           totalVolume: summary.volume || 0,
           totalSets: summary.setCount || 0,
@@ -186,14 +368,17 @@ exports.finishSession = async (userId, sessionId) => {
       { upsert: true, new: true },
     );
 
-    if (summary.bestWeight && summary.bestReps) {
-      const estimated1RM = summary.bestWeight * (1 + summary.bestReps / 30);
+    updatedStats.estimated1RM = Math.max(
+      updatedStats.estimated1RM || 0,
+      estimated1RM,
+    );
 
-      stats.estimated1RM = Math.max(stats.estimated1RM || 0, estimated1RM);
-
-      await stats.save();
-    }
+    await updatedStats.save();
   }
+
+  session.personalRecords = personalRecords;
+
+  await session.save();
 
   return session;
 };
@@ -236,4 +421,15 @@ exports.getSessionById = async (userId, sessionId) => {
     _id: sessionId,
     user: userId,
   }).populate("exercises.exercise");
+};
+
+exports.getActiveSession = async (userId) => {
+  const session = await WorkoutSession.findOne({
+    user: userId,
+    completed: false,
+  })
+    .sort({ startedAt: -1 })
+    .populate("exercises.exercise");
+
+  return session;
 };

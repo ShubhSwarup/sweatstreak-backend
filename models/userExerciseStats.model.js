@@ -42,6 +42,28 @@ const userExerciseStatsSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    failureCount: {
+      type: Number,
+      default: 0,
+    },
+
+    repRangeShifted: {
+      type: Boolean,
+      default: false,
+    },
+    failureCount: {
+      type: Number,
+      default: 0,
+    },
+    volumeScore: {
+      type: Number,
+      default: 0,
+    },
+
+    repRangeShifted: {
+      type: Boolean,
+      default: false,
+    },
 
     lastSession: Date,
   },

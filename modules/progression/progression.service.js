@@ -2,7 +2,9 @@ const UserExerciseStats = require("../../models/userExerciseStats.model");
 const Exercise = require("../../models/exercise.model");
 
 exports.getProgressionSuggestion = async (userId, exerciseId) => {
-  const exercise = await Exercise.findById(exerciseId);
+  const exercise = await Exercise.findById(exerciseId).select(
+    "type progressionStep",
+  );
 
   if (!exercise) throw new Error("Exercise not found");
 
@@ -26,7 +28,13 @@ exports.getProgressionSuggestion = async (userId, exerciseId) => {
     return {
       nextWeight: null,
       repRange: `${minRep}-${maxRep}`,
+      action: "start",
     };
+  }
+
+  if (stats.repRangeShifted) {
+    minRep += 2;
+    maxRep += 2;
   }
 
   const lastWeight = stats.lastWeight || 0;
@@ -34,21 +42,54 @@ exports.getProgressionSuggestion = async (userId, exerciseId) => {
   const bestReps = stats.bestReps || 0;
 
   const step = exercise.progressionStep || 2.5;
-
+  const volumeScore = lastWeight * lastReps;
+  const previousVolume = stats.volumeScore || 0;
   let nextWeight = lastWeight;
   let action = "hold";
 
-  // ---------- PROGRESSION ----------
-  if (lastReps >= maxRep && bestReps >= maxRep) {
-    nextWeight = lastWeight + step;
-    action = "increase";
+  // ---------- FAILURE TRACKING ----------
+
+  if (lastReps < minRep) {
+    stats.failureCount = (stats.failureCount || 0) + 1;
+  } else {
+    stats.failureCount = 0;
+  }
+
+  // ---------- PLATEAU DETECTION ----------
+
+  if (stats.failureCount >= 3 && !stats.repRangeShifted) {
+    stats.repRangeShifted = true;
+
+    minRep += 2;
+    maxRep += 2;
+
+    action = "shift";
   }
 
   // ---------- REGRESSION ----------
+
   if (lastReps < minRep) {
-    nextWeight = Math.max(lastWeight * 0.9, step);
-    action = "decrease";
+    if (volumeScore < previousVolume) {
+      nextWeight = Math.max(lastWeight - step, step);
+
+      action = "decrease";
+    } else {
+      action = "hold";
+    }
   }
+
+  // ---------- PROGRESSION ----------
+
+  if (lastReps >= maxRep && bestReps >= maxRep) {
+    nextWeight = lastWeight + step;
+
+    action = "increase";
+
+    stats.failureCount = 0;
+    stats.repRangeShifted = false;
+  }
+
+  await stats.save();
 
   return {
     lastWeight,
@@ -56,5 +97,22 @@ exports.getProgressionSuggestion = async (userId, exerciseId) => {
     nextWeight,
     action,
     repRange: `${minRep}-${maxRep}`,
+  };
+};
+
+exports.calculateSuggestionFromStats = (stats, exercise) => {
+  const step = exercise.progressionStep || 2.5;
+
+  let nextWeight = stats.lastWeight;
+  let action = "hold";
+
+  if (stats.lastReps >= stats.bestReps) {
+    nextWeight += step;
+    action = "increase";
+  }
+
+  return {
+    nextWeight,
+    action,
   };
 };
