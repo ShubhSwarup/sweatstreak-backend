@@ -3,7 +3,7 @@ const Exercise = require("../../models/exercise.model");
 
 exports.getProgressionSuggestion = async (userId, exerciseId) => {
   const exercise = await Exercise.findById(exerciseId).select(
-    "type progressionStep",
+    "exerciseType progressionStep",
   );
 
   if (!exercise) throw new Error("Exercise not found");
@@ -16,7 +16,7 @@ exports.getProgressionSuggestion = async (userId, exerciseId) => {
   let minRep;
   let maxRep;
 
-  if (exercise.type === "compound") {
+  if (exercise.exerciseType === "compound") {
     minRep = 6;
     maxRep = 8;
   } else {
@@ -32,6 +32,7 @@ exports.getProgressionSuggestion = async (userId, exerciseId) => {
     };
   }
 
+  // plateau shift
   if (stats.repRangeShifted) {
     minRep += 2;
     maxRep += 2;
@@ -44,6 +45,7 @@ exports.getProgressionSuggestion = async (userId, exerciseId) => {
   const step = exercise.progressionStep || 2.5;
   const volumeScore = lastWeight * lastReps;
   const previousVolume = stats.volumeScore || 0;
+
   let nextWeight = lastWeight;
   let action = "hold";
 
@@ -71,10 +73,7 @@ exports.getProgressionSuggestion = async (userId, exerciseId) => {
   if (lastReps < minRep) {
     if (volumeScore < previousVolume) {
       nextWeight = Math.max(lastWeight - step, step);
-
       action = "decrease";
-    } else {
-      action = "hold";
     }
   }
 
@@ -101,9 +100,9 @@ exports.getProgressionSuggestion = async (userId, exerciseId) => {
 };
 
 exports.calculateSuggestionFromStats = (stats, exercise) => {
-  const step = exercise.progressionStep || 2.5;
+  const step = exercise?.progressionStep || 2.5;
 
-  let nextWeight = stats.lastWeight;
+  let nextWeight = stats.lastWeight || 0;
   let action = "hold";
 
   if (stats.lastReps >= stats.bestReps) {

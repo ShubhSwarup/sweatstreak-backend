@@ -14,24 +14,26 @@ exports.getDashboard = async (userId) => {
     .sort({ endedAt: -1 })
     .select("endedAt durationSeconds sessionSummary");
 
-  // ---------- 3️⃣ WEEKLY WORKOUTS ----------
-  const startOfWeek = new Date();
-  startOfWeek.setDate(startOfWeek.getDate() - 7);
+  // ---------- 3️⃣ LAST 7 DAYS WORKOUTS ----------
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
   const weeklySessions = await WorkoutSession.find({
     user: userId,
     completed: true,
-    endedAt: { $gte: startOfWeek },
+    endedAt: { $gte: sevenDaysAgo },
   }).select("exercises.exercise exercises.summary sessionSummary");
 
   let weeklyVolume = 0;
-
   const exerciseVolumeMap = {};
 
   for (const session of weeklySessions) {
     weeklyVolume += session.sessionSummary?.totalVolume || 0;
 
     for (const ex of session.exercises) {
+      // defensive guard
+      if (!ex.exercise) continue;
+
       const exerciseId = ex.exercise.toString();
 
       if (!exerciseVolumeMap[exerciseId]) {

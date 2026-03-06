@@ -79,6 +79,7 @@ exports.startSession = async (userId, data) => {
       const exerciseId = ex.exercise.toString();
 
       const exerciseDoc = exerciseMap.get(exerciseId);
+      if (!exerciseDoc) continue;
       const lastExercise = lastExerciseMap.get(exerciseId);
       const stats = statsMap.get(exerciseId);
 
@@ -143,6 +144,11 @@ exports.addExercise = async (userId, sessionId, exerciseData) => {
   if (session.completed) {
     throw new Error("Session already finished");
   }
+
+  const exerciseDoc = await Exercise.findById(exerciseData.exercise);
+
+  if (!exerciseDoc) throw new Error("Exercise not found");
+
   session.exercises.push({
     exercise: exerciseData.exercise,
     order: exerciseData.order,
@@ -225,16 +231,88 @@ exports.finishSession = async (userId, sessionId) => {
   let totalExercises = 0;
 
   const personalRecords = [];
-
   const bulkOps = [];
+
+  const previousStatsMap = new Map();
+
+  const statsList = await UserExerciseStats.find({
+    user: userId,
+  }).lean();
+
+  for (const stat of statsList) {
+    previousStatsMap.set(stat.exercise.toString(), stat);
+  }
 
   for (const ex of session.exercises) {
     const summary = ex.summary;
     if (!summary) continue;
 
-    const volumeScore = summary.volume;
+    totalVolume += summary.volume || 0;
+    totalSets += summary.setCount || 0;
+    totalExercises += 1;
 
+    const volumeScore = summary.volume;
     const estimated1RM = summary.bestWeight * (1 + summary.bestReps / 30);
+
+    const previousStats = previousStatsMap.get(ex.exercise.toString());
+
+    const previousBestWeight = previousStats?.bestWeight || 0;
+    const previousVolume = previousStats?.volumeScore || 0;
+    const previous1RM = previousStats?.estimated1RM || 0;
+
+    // detect PRs
+
+    if (summary.bestWeight > previousBestWeight) {
+      personalRecords.push({
+        exercise: ex.exercise,
+        type: "weight",
+        value: summary.bestWeight,
+      });
+    }
+
+    if (volumeScore > previousVolume) {
+      personalRecords.push({
+        exercise: ex.exercise,
+        type: "volume",
+        value: volumeScore,
+      });
+    }
+
+    if (estimated1RM > previous1RM) {
+      personalRecords.push({
+        exercise: ex.exercise,
+        type: "1rm",
+        value: estimated1RM,
+      });
+    }
+
+    // cardio PR detection
+    if (ex.exerciseType === "cardio") {
+      let bestDistance = 0;
+      let bestTime = 0;
+
+      for (const set of ex.sets) {
+        if (set.distance) bestDistance = Math.max(bestDistance, set.distance);
+        if (set.durationSeconds)
+          bestTime = Math.max(bestTime, set.durationSeconds);
+      }
+
+      if (bestDistance > (previousStats?.bestDistance || 0)) {
+        personalRecords.push({
+          exercise: ex.exercise,
+          type: "distance",
+          value: bestDistance,
+        });
+      }
+
+      if (bestTime > (previousStats?.bestTime || 0)) {
+        personalRecords.push({
+          exercise: ex.exercise,
+          type: "time",
+          value: bestTime,
+        });
+      }
+    }
 
     bulkOps.push({
       updateOne: {
@@ -274,111 +352,13 @@ exports.finishSession = async (userId, sessionId) => {
     totalExercises,
   };
 
-  await session.save();
-
-  const streak = await streakService.updateStreak(userId, session.endedAt);
-  await xpService.addWorkoutXP(userId, session, streak?.currentStreak > 1);
-
-  for (const ex of session.exercises) {
-    const summary = ex.summary;
-    if (!summary) continue;
-
-    const volumeScore = summary.volume;
-
-    const stats = await UserExerciseStats.findOne({
-      user: userId,
-      exercise: ex.exercise,
-    });
-
-    const previousBestWeight = stats?.bestWeight || 0;
-    const previousVolume = stats?.volumeScore || 0;
-    const previous1RM = stats?.estimated1RM || 0;
-
-    const estimated1RM = summary.bestWeight * (1 + summary.bestReps / 30);
-
-    if (summary.bestWeight > previousBestWeight) {
-      personalRecords.push({
-        exercise: ex.exercise,
-        type: "weight",
-        value: summary.bestWeight,
-      });
-    }
-
-    if (volumeScore > previousVolume) {
-      personalRecords.push({
-        exercise: ex.exercise,
-        type: "volume",
-        value: volumeScore,
-      });
-    }
-
-    if (estimated1RM > previous1RM) {
-      personalRecords.push({
-        exercise: ex.exercise,
-        type: "1rm",
-        value: estimated1RM,
-      });
-    }
-
-    if (ex.exerciseType === "cardio") {
-      let bestDistance = 0;
-      let bestTime = 0;
-
-      for (const set of ex.sets) {
-        if (set.distance) bestDistance = Math.max(bestDistance, set.distance);
-        if (set.durationSeconds)
-          bestTime = Math.max(bestTime, set.durationSeconds);
-      }
-
-      if (bestDistance > (stats?.bestDistance || 0)) {
-        personalRecords.push({
-          exercise: ex.exercise,
-          type: "distance",
-          value: bestDistance,
-        });
-      }
-
-      if (bestTime > (stats?.bestTime || 0)) {
-        personalRecords.push({
-          exercise: ex.exercise,
-          type: "time",
-          value: bestTime,
-        });
-      }
-    }
-
-    const updatedStats = await UserExerciseStats.findOneAndUpdate(
-      { user: userId, exercise: ex.exercise },
-      {
-        $max: {
-          bestWeight: summary.bestWeight,
-          bestReps: summary.bestReps,
-          volumeScore,
-        },
-        $set: {
-          lastWeight: summary.bestWeight,
-          lastReps: summary.bestReps,
-          lastSession: session.endedAt,
-        },
-        $inc: {
-          totalVolume: summary.volume || 0,
-          totalSets: summary.setCount || 0,
-        },
-      },
-      { upsert: true, new: true },
-    );
-
-    updatedStats.estimated1RM = Math.max(
-      updatedStats.estimated1RM || 0,
-      estimated1RM,
-    );
-
-    await updatedStats.save();
-  }
-
   session.personalRecords = personalRecords;
 
   await session.save();
+
+  const streak = await streakService.updateStreak(userId, session.endedAt);
+
+  await xpService.addWorkoutXP(userId, session, streak?.currentStreak > 1);
 
   return session;
 };

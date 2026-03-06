@@ -14,7 +14,7 @@ const streakRoutes = require("./modules/streak/streak.routes");
 const dashboardRoutes = require("./modules/dashboard/dashboard.routes");
 const analyticsRoutes = require("./modules/analytics/analytics.routes");
 const xpRoutes = require("./modules/xp/xp.routes");
-const plateCalc = require("./utils/plateCalculator");
+const plateRoutes = require("./modules/plateCalculator/plate.routes");
 
 const app = express();
 
@@ -42,5 +42,5 @@ app.use("/api/streak", streakRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/analytics", analyticsRoutes);
 app.use("/api/xp", xpRoutes);
-app.use("/api/plateCalculator/:targetWeight/:barWeight", plateCalc);
+app.use("/api/plateCalculator", plateRoutes);
 module.exports = app;
