@@ -29,12 +29,32 @@ const exerciseSchema = new mongoose.Schema(
         "core",
         "glutes",
         "calves",
+        "cardio",
+      ],
+    },
+    primaryMuscles: {
+      type: [String],
+      required: true,
+      enum: [
+        "chest",
+        "back",
+        "shoulders",
+        "legs",
+        "biceps",
+        "triceps",
+        "core",
+        "glutes",
+        "calves",
+        "cardio",
       ],
     },
 
+    secondaryMuscles: {
+      type: [String],
+      default: [],
+    },
     type: {
       type: String,
-      required: true,
       enum: ["compound", "isolation"],
     },
 
@@ -60,27 +80,44 @@ const exerciseSchema = new mongoose.Schema(
     defaultRepRange: {
       min: {
         type: Number,
-        required: true,
       },
       max: {
         type: Number,
-        required: true,
       },
     },
+    exerciseType: {
+      type: String,
+      enum: ["strength", "cardio"],
+      default: "strength",
+    },
 
+    trackingType: {
+      type: String,
+      enum: ["reps", "time", "distance"],
+      default: "reps",
+    },
     description: {
       type: String,
       trim: true,
     },
-
+    imageUrl: {
+      type: String,
+    },
+    videoUrl: {
+      type: String,
+    },
     isSystem: {
       type: Boolean,
       default: true,
     },
+    progressionStep: {
+      type: Number,
+      default: 2.5,
+    },
   },
   { timestamps: true },
 );
-exerciseSchema.index({ name: "text" });
 exerciseSchema.index({ muscleGroup: 1 });
-
+exerciseSchema.index({ primaryMuscles: 1 });
+exerciseSchema.index({ exerciseType: 1 });
 module.exports = mongoose.model("Exercise", exerciseSchema);
